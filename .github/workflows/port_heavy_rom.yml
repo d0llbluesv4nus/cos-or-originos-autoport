@@ -37,7 +37,7 @@ jobs:
       - name: Install Porting Tools
         run: |
           sudo apt-get update
-          # ИСПРАВЛЕНИЕ: Заменены img2simg и simg2img на android-sdk-libsparse-utils
+          # ИСПРАВЛЕНИЕ НИЖЕ: заменены img2simg и simg2img на android-sdk-libsparse-utils
           sudo apt-get install -y git wget unzip tar adb autoconf automake libtool android-sdk-libsparse-utils aria2 python3-pip e2fsprogs
           sudo apt-get install -y erofs-utils
           
@@ -176,10 +176,6 @@ jobs:
           # DPI 440 (стандарт для Poco F3)
           find . -name "build.prop" -print0 | xargs -0 sudo sed -i 's/ro.sf.lcd_density=.*/ro.sf.lcd_density=440/g'
 
-          # 6. FIX BRIGHTNESS (Если есть папка с конфигами дисплея)
-          # Иногда нужно удалять конфиги дисплея донора, чтобы система взяла дефолтные
-          # sudo rm -rf product/etc/display/*
-
       # 6. ПАТЧИНГ ЯДРА (BOOT.IMG)
       - name: Patch Boot Image
         run: |
@@ -256,8 +252,6 @@ jobs:
           git clone https://github.com/n00b69/f3-flashable-template.git temp_tmpl
           cp -r temp_tmpl/META-INF .
           rm -rf temp_tmpl
-          
-          # Можно добавить firmware-update если нужно, но для порта обычно не кладут
           
           echo ">>> Zipping..."
           zip -r9 Ported_ROM_Alioth.zip .
