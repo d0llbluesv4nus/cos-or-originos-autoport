@@ -37,7 +37,8 @@ jobs:
       - name: Install Porting Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y git wget unzip tar adb autoconf automake libtool simg2img img2simg aria2 python3-pip e2fsprogs
+          # ИСПРАВЛЕНИЕ: Заменены img2simg и simg2img на android-sdk-libsparse-utils
+          sudo apt-get install -y git wget unzip tar adb autoconf automake libtool android-sdk-libsparse-utils aria2 python3-pip e2fsprogs
           sudo apt-get install -y erofs-utils
           
           # Установка payload-dumper-go
