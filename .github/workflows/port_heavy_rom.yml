@@ -37,7 +37,7 @@ jobs:
       - name: Install Porting Tools
         run: |
           sudo apt-get update
-          # ИСПРАВЛЕНИЕ НИЖЕ: заменены img2simg и simg2img на android-sdk-libsparse-utils
+          # ИСПРАВЛЕНИЕ: Пакеты simg2img и img2simg заменены на android-sdk-libsparse-utils
           sudo apt-get install -y git wget unzip tar adb autoconf automake libtool android-sdk-libsparse-utils aria2 python3-pip e2fsprogs
           sudo apt-get install -y erofs-utils
           
@@ -46,10 +46,17 @@ jobs:
           tar -xvf payload-dumper-go_1.2.2_linux_amd64.tar.gz
           sudo mv payload-dumper-go /usr/local/bin/
 
-          # Установка magiskboot (для перепаковки boot.img)
-          wget https://github.com/hmtheboy15/MagiskBoot/raw/main/magiskboot
+          # ИСПРАВЛЕНИЕ: Установка magiskboot из официального релиза Magisk (так как старая ссылка умерла)
+          echo ">>> Downloading Magisk..."
+          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          
+          echo ">>> Extracting magiskboot..."
+          # Извлекаем версию x86_64 для использования в GitHub Actions
+          unzip -j Magisk-v27.0.apk lib/x86_64/libmagiskboot.so
+          mv libmagiskboot.so magiskboot
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
+          rm Magisk-v27.0.apk
 
           # Создаем структуру папок
           mkdir -p work/base work/port work/repack
