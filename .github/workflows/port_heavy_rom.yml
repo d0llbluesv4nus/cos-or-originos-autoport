@@ -23,18 +23,27 @@ jobs:
     runs-on: ubuntu-24.04
     
     steps:
-      # 1. РУЧНАЯ ОЧИСТКА МЕСТА (Без использования сторонних экшенов)
-      - name: Free Disk Space (Manual)
+      # 1. ОЧИСТКА МЕСТА + СОЗДАНИЕ SWAP (Баланс между памятью и диском)
+      - name: Free Disk Space & Create Swap
         run: |
           echo ">>> Freeing disk space..."
-          # Удаляем ненужный предустановленный софт
+          # Удаляем тяжелые пакеты
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-          # Чистим Docker образы
           sudo docker image prune --all --force
-          echo ">>> Disk space freed."
+          
+          echo ">>> Creating 4GB Swap file (Fix for Exit code 137)..."
+          # Создаем файл подкачки 4ГБ (достаточно для cp, но экономит место)
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          
+          # Проверяем место
+          df -h
+          free -h
 
       # 2. Установка необходимых инструментов
       - name: Install Porting Tools
@@ -49,7 +58,7 @@ jobs:
           sudo mv payload-dumper-go /usr/local/bin/
           rm payload-dumper-go_1.2.2_linux_amd64.tar.gz
 
-          # Установка magiskboot (Надежный способ: из официального APK Magisk v27.0)
+          # Установка magiskboot
           echo ">>> Downloading Magisk..."
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip -j Magisk-v27.0.apk lib/x86_64/libmagiskboot.so
@@ -71,7 +80,7 @@ jobs:
           echo ">>> Extracting Base..."
           payload-dumper-go -o base_out base.zip || unzip base.zip -d base_out
           echo ">>> Deleting Base Zip..."
-          rm -f base.zip  # УДАЛЯЕМ ZIP СРАЗУ
+          rm -f base.zip
           
           # --- PORT ROM ---
           echo ">>> Downloading Port ROM..."
@@ -79,7 +88,7 @@ jobs:
           echo ">>> Extracting Port..."
           payload-dumper-go -o port_out port.zip || unzip port.zip -d port_out
           echo ">>> Deleting Port Zip..."
-          rm -f port.zip  # УДАЛЯЕМ ZIP СРАЗУ
+          rm -f port.zip
 
       # 4. Подготовка образов
       - name: Prepare Images
@@ -91,6 +100,9 @@ jobs:
             img_path=$1
             out_dir=$2
             echo "Processing $img_path..."
+            # Сброс кэша перед тяжелой операцией
+            sync
+            
             if magic=$(head -c 4 "$img_path" | xxd -p) && [ "$magic" = "e2e1f5e0" ]; then
               fsck.erofs --extract="$out_dir" "$img_path"
             else
@@ -100,10 +112,11 @@ jobs:
               fi
               mkdir -p "$out_dir"
               sudo mount -o ro,loop "$img_path" mnt_point
+              # Копируем с сохранением атрибутов
               sudo cp -a mnt_point/* "$out_dir"/
               sudo umount mnt_point
             fi
-            # УДАЛЯЕМ ИСХОДНЫЙ ОБРАЗ ПОСЛЕ РАСПАКОВКИ ДЛЯ ЭКОНОМИИ МЕСТА
+            # УДАЛЯЕМ ИСХОДНЫЙ ОБРАЗ СРАЗУ ПОСЛЕ РАСПАКОВКИ
             rm -f "$img_path"
           }
           
@@ -194,9 +207,10 @@ jobs:
             type="${{ github.event.inputs.repack_type }}"
             
             echo ">>> Repacking $dir_name to $type..."
+            # Очистка кэша перед упаковкой
+            sync
             if [ "$type" = "erofs" ]; then
                mkfs.erofs -zLZ4HC "$out_name.img" "$dir_name"
-               # После упаковки удаляем папку, чтобы освободить место для следующего шага
                sudo rm -rf "$dir_name"
             else
                SIZE=$(du -sb "$dir_name" | cut -f1)
