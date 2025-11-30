@@ -1,0 +1,269 @@
+name: Port Heavy ROM (ColorOS/OriginOS) to Alioth
+
+on:
+  workflow_dispatch:
+    inputs:
+      BASE_ROM_URL:
+        description: 'Ссылка на базовую прошивку Alioth (MIUI/HyperOS)'
+        required: true
+      PORT_ROM_URL:
+        description: 'Ссылка на прошивку-донора (ColorOS, OriginOS, Flyme)'
+        required: true
+      repack_type:
+        description: 'Тип файловой системы (erofs для Android 13/14, ext4 для старых)'
+        required: true
+        default: 'erofs'
+        type: choice
+        options:
+        - erofs
+        - ext4
+
+jobs:
+  porting:
+    runs-on: ubuntu-24.04
+    
+    steps:
+      # 1. Очистка и подготовка среды
+      - name: Cleanup & Setup
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-codeql: 'true'
+
+      # 2. Установка необходимых инструментов
+      - name: Install Porting Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget unzip tar adb autoconf automake libtool simg2img img2simg aria2 python3-pip e2fsprogs
+          sudo apt-get install -y erofs-utils
+          
+          # Установка payload-dumper-go
+          wget https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+          tar -xvf payload-dumper-go_1.2.2_linux_amd64.tar.gz
+          sudo mv payload-dumper-go /usr/local/bin/
+
+          # Установка magiskboot (для перепаковки boot.img)
+          wget https://github.com/hmtheboy15/MagiskBoot/raw/main/magiskboot
+          chmod +x magiskboot
+          sudo mv magiskboot /usr/local/bin/
+
+          # Создаем структуру папок
+          mkdir -p work/base work/port work/repack
+
+      # 3. Скачивание и распаковка
+      - name: Download & Extract
+        run: |
+          cd work
+          echo ">>> Downloading Base ROM..."
+          aria2c -x16 -s16 -o base.zip "${{ github.event.inputs.BASE_ROM_URL }}"
+          
+          echo ">>> Downloading Port ROM..."
+          aria2c -x16 -s16 -o port.zip "${{ github.event.inputs.PORT_ROM_URL }}"
+          
+          echo ">>> Extracting Base..."
+          payload-dumper-go -o base_out base.zip || unzip base.zip -d base_out
+          
+          echo ">>> Extracting Port..."
+          payload-dumper-go -o port_out port.zip || unzip port.zip -d port_out
+
+      # 4. Подготовка образов к редактированию
+      - name: Prepare Images
+        run: |
+          cd work
+          mkdir -p mnt_point
+          
+          # Функция распаковки (EROFS / Sparse / EXT4)
+          extract_image() {
+            img_path=$1
+            out_dir=$2
+            echo "Processing $img_path..."
+            
+            # Проверка на EROFS
+            if magic=$(head -c 4 "$img_path" | xxd -p) && [ "$magic" = "e2e1f5e0" ]; then
+              echo "Detected EROFS. Extracting to $out_dir..."
+              fsck.erofs --extract="$out_dir" "$img_path"
+            else
+              # Проверка на Sparse
+              if file "$img_path" | grep -q "Android sparse"; then
+                 simg2img "$img_path" raw.img
+                 mv raw.img "$img_path"
+              fi
+              # Монтирование EXT4
+              mkdir -p "$out_dir"
+              sudo mount -o ro,loop "$img_path" mnt_point
+              sudo cp -a mnt_point/* "$out_dir"/
+              sudo umount mnt_point
+            fi
+          }
+          
+          # Извлекаем основные разделы Порта
+          for part in system product system_ext; do
+            [ -f port_out/$part.img ] && extract_image port_out/$part.img repack/$part
+          done
+          
+          # Берем Vendor, Boot, ODM от Базы (Alioth)
+          cp base_out/vendor.img repack/vendor.img
+          cp base_out/boot.img repack/boot.img
+          cp base_out/dtbo.img repack/dtbo.img || true
+          [ -f base_out/odm.img ] && cp base_out/odm.img repack/odm.img
+
+      # 5. ГЛАВНЫЙ ПАТЧИНГ (Система, Оверлеи, Конфиги)
+      - name: HEAVY PATCHING
+        run: |
+          cd work/repack
+          
+          echo "--------------------------------------"
+          echo ">>> STARTING SYSTEM PATCHING"
+          echo "--------------------------------------"
+          
+          # 1. УСТАНОВКА OVERLAY (FIX UI)
+          # Используем репозиторий: https://github.com/d0llbluesv4nus/overlayapk
+          echo ">>> Installing Alioth Overlay..."
+          
+          mkdir -p product/overlay
+          
+          # Скачиваем APK
+          git clone https://github.com/d0llbluesv4nus/overlayapk temp_overlay
+          
+          # Копируем APK в систему
+          if ls temp_overlay/*.apk 1> /dev/null 2>&1; then
+            echo "Overlay found. Installing..."
+            sudo cp temp_overlay/*.apk product/overlay/
+            sudo chmod 644 product/overlay/*.apk
+            
+            # УДАЛЕНИЕ КОНФЛИКТОВ
+            # Удаляем оверлеи донора, которые перекрывают наш вырез камеры
+            echo "Removing conflicting overlays..."
+            sudo rm -f product/overlay/*DisplayCutout*.apk
+            sudo rm -f product/overlay/*RoundedCorners*.apk
+            sudo rm -f product/overlay/*Notch*.apk
+          else
+             echo "!!! ERROR: No APK found in overlay repo !!!"
+          fi
+          rm -rf temp_overlay
+
+          # 2. PATCHING INIT.RC (Отключение проверок)
+          echo ">>> Patching init.rc files..."
+          # Отключаем проверку ключей AVB (чтобы система загрузилась с измененными файлами)
+          find . -name "*.rc" -print0 | xargs -0 sudo sed -i 's/avb_keys/disabled_avb_keys/g'
+          find . -name "*.rc" -print0 | xargs -0 sudo sed -i 's/dm-verity/disabled-dm-verity/g'
+          
+          # 3. PATCHING FSTAB (В System/Vendor)
+          echo ">>> Patching fstab..."
+          # Заменяем forceencrypt на encryptable (чтобы не требовало формат даты)
+          # Заменяем avb на wa (warning only)
+          grep -r "fstab" . || true
+          find system -name "fstab*" -print0 | xargs -0 sudo sed -i 's/forceencrypt/encryptable/g'
+          find system -name "fstab*" -print0 | xargs -0 sudo sed -i 's/fileencryption/encryptable/g'
+          find system -name "fstab*" -print0 | xargs -0 sudo sed -i 's/avb/wa/g'
+          find system -name "fstab*" -print0 | xargs -0 sudo sed -i 's/,verify//g'
+
+          # 4. REMOVE RECOVERY RESTORATION
+          echo ">>> Debloating recovery installer..."
+          sudo rm -rf system/recovery-from-boot.p
+          sudo rm -rf system/bin/install-recovery.sh
+          
+          # 5. BUILD.PROP SPOOFING
+          echo ">>> Editing build.prop for Alioth..."
+          # Ставим имя Alioth, чтобы GApps и система считали устройство родным
+          find . -name "build.prop" -print0 | xargs -0 sudo sed -i 's/ro.product.device=.*/ro.product.device=alioth/g'
+          find . -name "build.prop" -print0 | xargs -0 sudo sed -i 's/ro.product.model=.*/ro.product.model=M2012K11AC/g'
+          find . -name "build.prop" -print0 | xargs -0 sudo sed -i 's/ro.product.name=.*/ro.product.name=alioth/g'
+          # DPI 440 (стандарт для Poco F3)
+          find . -name "build.prop" -print0 | xargs -0 sudo sed -i 's/ro.sf.lcd_density=.*/ro.sf.lcd_density=440/g'
+
+          # 6. FIX BRIGHTNESS (Если есть папка с конфигами дисплея)
+          # Иногда нужно удалять конфиги дисплея донора, чтобы система взяла дефолтные
+          # sudo rm -rf product/etc/display/*
+
+      # 6. ПАТЧИНГ ЯДРА (BOOT.IMG)
+      - name: Patch Boot Image
+        run: |
+          cd work/repack
+          echo ">>> Unpacking Boot.img..."
+          magiskboot unpack boot.img
+          
+          if [ -f ramdisk.cpio ]; then
+            echo ">>> Patching Ramdisk Fstab..."
+            magiskboot cpio ramdisk.cpio extract
+            
+            # Патчим fstab.qcom внутри ramdisk (Самое важное место для загрузки!)
+            if [ -f fstab.qcom ]; then
+                sed -i 's/,verify//g' fstab.qcom
+                sed -i 's/,avb//g' fstab.qcom
+                sed -i 's/forceencrypt/encryptable/g' fstab.qcom
+                sed -i 's/wait,check/wait,check,quota/g' fstab.qcom
+            fi
+            
+            # Запаковываем ramdisk
+            magiskboot cpio ramdisk.cpio patch
+            magiskboot cpio ramdisk.cpio repack ramdisk_new.cpio
+            mv ramdisk_new.cpio ramdisk.cpio
+          fi
+          
+          echo ">>> Repacking Boot..."
+          magiskboot repack boot.img
+          mv new-boot.img boot-patched.img
+          
+          # Чистим
+          rm -f boot.img *cpio *dtb kernel
+
+      # 7. СБОРКА ОБРАЗОВ (REPACK)
+      - name: Repack Images
+        run: |
+          cd work/repack
+          
+          repack_fs() {
+            dir_name=$1
+            out_name=$2
+            type="${{ github.event.inputs.repack_type }}"
+            
+            echo ">>> Repacking $dir_name to $type..."
+            if [ "$type" = "erofs" ]; then
+               # LZ4HC сжатие для лучшей производительности
+               mkfs.erofs -zLZ4HC "$out_name.img" "$dir_name"
+               # Если erofs падает (иногда бывает на Github Actions из-за версии), можно попробовать без -z
+            else
+               # Ext4
+               SIZE=$(du -sb "$dir_name" | cut -f1)
+               SIZE=$((SIZE + 100000000)) # +100MB
+               make_ext4fs -s -l $SIZE -a "$dir_name" "$out_name.img" "$dir_name"
+            fi
+          }
+          
+          [ -d system ] && repack_fs system system
+          [ -d product ] && repack_fs product product
+          [ -d system_ext ] && repack_fs system_ext system_ext
+
+      # 8. СОЗДАНИЕ FLASHABLE ZIP
+      - name: Create ZIP
+        run: |
+          cd work
+          mkdir final_zip
+          cd final_zip
+          
+          echo ">>> Preparing ZIP structure..."
+          mv ../repack/*.img .
+          # Переименовываем патченое ядро в boot.img
+          mv boot-patched.img boot.img
+          
+          # Скачиваем шаблон META-INF для установки
+          # Используем шаблон, поддерживающий динамические разделы Poco F3
+          git clone https://github.com/n00b69/f3-flashable-template.git temp_tmpl
+          cp -r temp_tmpl/META-INF .
+          rm -rf temp_tmpl
+          
+          # Можно добавить firmware-update если нужно, но для порта обычно не кладут
+          
+          echo ">>> Zipping..."
+          zip -r9 Ported_ROM_Alioth.zip .
+
+      # 9. ЗАГРУЗКА РЕЗУЛЬТАТА
+      - name: Upload ROM
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ported_ROM_Alioth_${{ github.run_id }}
+          path: work/final_zip/Ported_ROM_Alioth.zip
