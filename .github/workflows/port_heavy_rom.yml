@@ -23,17 +23,18 @@ jobs:
     runs-on: ubuntu-24.04
     
     steps:
-      # 1. МАКСИМАЛЬНАЯ ОЧИСТКА МЕСТА (Исправление ошибки No space left)
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space-action@v1.3.1
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false # Отключаем swap, чтобы сохранить место на диске
+      # 1. РУЧНАЯ ОЧИСТКА МЕСТА (Без использования сторонних экшенов)
+      - name: Free Disk Space (Manual)
+        run: |
+          echo ">>> Freeing disk space..."
+          # Удаляем ненужный предустановленный софт
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          # Чистим Docker образы
+          sudo docker image prune --all --force
+          echo ">>> Disk space freed."
 
       # 2. Установка необходимых инструментов
       - name: Install Porting Tools
@@ -48,7 +49,7 @@ jobs:
           sudo mv payload-dumper-go /usr/local/bin/
           rm payload-dumper-go_1.2.2_linux_amd64.tar.gz
 
-          # Установка magiskboot
+          # Установка magiskboot (Надежный способ: из официального APK Magisk v27.0)
           echo ">>> Downloading Magisk..."
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip -j Magisk-v27.0.apk lib/x86_64/libmagiskboot.so
